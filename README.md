@@ -5,9 +5,10 @@
 [![GORM](https://img.shields.io/badge/GORM-v1.25.0-blue?style=flat)](https://gorm.io/)
 [![MySQL](https://img.shields.io/badge/MySQL-8.0-4479A1?style=flat&logo=mysql)](https://www.mysql.com/)
 [![DeepSeek](https://img.shields.io/badge/LLM-DeepSeek-0066FF?style=flat)](https://deepseek.com/)
+[![FFmpeg](https://img.shields.io/badge/FFmpeg-7.0%2B-green?style=flat&logo=ffmpeg)](https://ffmpeg.org/)
 
-> **EchoCraft** 是一个面向 AIGC 长耗时场景的高性能、轻量级异步任务编排与短播客生成服务。  
-> 客户端提交一个生成主题后，服务端在 **10ms 内极速返回任务单号**；后台基于 **Go 缓冲 Channel 与常驻 Worker 池** 实现削峰消费，全链路串联大语言模型（DeepSeek）文案生成与微软 Edge-TTS 语音合成，最终交付单文件 `.mp3` 播客成果。
+> **EchoCraft** 是一个面向 AIGC 长耗时场景的高性能、轻量级异步任务编排与多媒体生成服务。  
+> 客户端提交一个生成主题后，服务端在 **10ms 内极速返回任务单号**；后台基于 **Go 缓冲 Channel 与常驻 Worker 池** 实现削峰消费，全链路串联大语言模型（DeepSeek）宏大叙事文案生成、Edge-TTS 语音合成与毫秒级时间轴字幕提取，并通过 **FFmpeg 实现人声与太空 Ambient BGM 的双轨多媒体混音**，最终交付电影质感音视频成果。
 
 ---
 
@@ -49,11 +50,12 @@ flowchart TD
 
     subgraph Worker 业务流水线 (挂载 30s Context 超时保护)
         Check{"检查数据库已有 script_content？"}
-        Check -- "无文案 (首次执行)" --> LLM["调用 DeepSeek 生成 200 字口播文案"]
+        Check -- "无文案 (首次执行)" --> LLM["调用 DeepSeek 生成宏大沉浸解说文案"]
         LLM --> SaveScript["DAO 更新：持久化文案，推进至 SCRIPT_DONE"]
-        SaveScript --> TTS["调用 Edge-TTS 生成单文件 .mp3"]
+        SaveScript --> TTS["调用 Edge-TTS 生成干音 + 提取毫秒级时间轴字幕 (.vtt)"]
         Check -- "已有文案 (断点续跑命中)" --> TTS
-        TTS --> SaveAudio["DAO 更新：落盘至 storage/，状态推至 SUCCESS"]
+        TTS --> Mix["调 FFmpeg 执行双轨滤镜：人声 + 太空 BGM 自动音量与时长裁切混音"]
+        Mix --> SaveAudio["DAO 更新：落盘至 storage/，状态推至 SUCCESS"]
     end
 
     Client -. "7. GET /api/v1/tasks/:task_id (轮询进度)" .-> Handler
@@ -91,6 +93,18 @@ stateDiagram-v2
 ### 3. 全链路生命周期熔断：防止协程与僵尸进程泄漏
 * **超时传播**：单次任务调度全流程挂载 `context.WithTimeout(30s)`；
 * **子进程安全管控**：调用外部 TTS 命令行时强制使用 `exec.CommandContext(ctx, ...)`，超时瞬间自动向操作系统发送 `SIGKILL` 终止子进程，绝不残留僵尸进程。
+
+### 4. FFmpeg 多媒体双轨混音与时间轴字幕提取
+* **音频质感升级**：引入 FFmpeg 复杂音频滤镜（`filter_complex`），将人声与深空环境背景音（Ambient BGM）实时混流，自动衰减 BGM 音量（-15dB）并在人声结束瞬间平滑截断；
+* **时间轴精准对齐**：通过 `--write-subtitles` 原生提取带毫秒级时间戳的 `.vtt` 字幕文件，为后续自动化视频装配打下坚实基础。
+
+---
+
+## 四、 项目演进路线 (Roadmap)
+- [x] **Phase 1**：基于 Go 原生 Channel 与常驻 Worker 池实现削峰解耦与四态断点续跑；
+- [x] **Phase 2**：接入 FFmpeg 实现人声与太空 BGM 双轨混音，并同步抽取毫秒级精准字幕；
+- [ ] **Phase 3**：构建 FFmpeg 视频合成流水线，实现宇宙循环背景图/视频与字幕硬压制（交付 1080P MP4 视频）；
+- [ ] **Phase 4**：设计可插拔 `TTSProvider` 接口架构，支持无缝切换至字节跳动火山引擎语音大模型。
 
 ---
 

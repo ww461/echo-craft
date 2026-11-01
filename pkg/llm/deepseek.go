@@ -39,9 +39,8 @@ type ChatResp struct {
 //传入上下文、密钥、主题，想deepseek请求200字口播文案,Generatescript-生成文本
 	//ctx是30s的闹钟
 func GenerateScript(ctx context.Context,apiKey string,topic string) (string,error){
-	//组装prompt:设定人设，要求生动幽默并限制字数
-	prompt := fmt.Sprintf("你是一个短博客主播。请围绕【%s】写一段200字左右生动幽默的口播文案,直接输出文案内容:",topic)
-	//构建符合openai协议的请求体对象
+	//组装prompt:设定人设，
+	prompt := fmt.Sprintf("你是一位顶级宇宙物理纪录片的首席解说员。请围绕【%s】写一段200字左右充满哲学沉思、宏大深邃的中文解说词。严禁出现'家人们'、'大家好'、'今天聊聊'等网红口语，开篇直接从宏观宇宙视角展开叙事:", topic)
 	reqBody := ChatReq{
 		Model: "deepseek-flash",
 		Messages: []Message{{Role:"user",Content: prompt}},
