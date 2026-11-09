@@ -21,7 +21,10 @@ func main() {
 		panic("缺失API_KEY配置,请检查.env文件!")
 	}
 	
-	dsn := "root:123456@tcp(127.0.0.1:3306)/echocraft?charset=utf8mb4&parseTime=True&loc=Local"
+	dsn := os.Getenv("MYSQL_DSN")
+	if dsn == ""{
+		panic("缺少MYSQL_DSN配置,请检查.env文件")
+	}
 	db, err := gorm.Open(mysql.Open(dsn), &gorm.Config{})
 	if err != nil {
 		panic("连接数据库失败：" + err.Error())
@@ -35,5 +38,9 @@ func main() {
 	r := gin.Default()
 	TaskHandler.RegisterRoutes(r)
 
-	r.Run(":9090")
+	addr := os.Getenv("SERVER_ADDR")
+	if addr == ""{
+		addr = ":9090"
+	}
+	r.Run(addr)
 }
