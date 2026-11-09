@@ -3,6 +3,8 @@ package api
 import (
 	"echocraft/internal/model"
 	"echocraft/internal/service"
+	"errors"
+	"net/http"
 
 	"github.com/gin-gonic/gin"
 )
@@ -24,15 +26,20 @@ func (h *TaskHandler) CreateTask(c *gin.Context){
 	var req model.CreateTaskReq
 
 	if err := c.ShouldBindJSON(&req);err != nil{
-		c.JSON(400,gin.H{"error":"参数校验失败,topic为必填项"})
+		c.JSON(http.StatusBadRequest,gin.H{"error":"参数校验失败,topic为必填项"})
 		return
 	}
 	taskID,err := h.service.CreateTask(req.Topic)
 	if err != nil{
-		c.JSON(500,gin.H{"error":"创建任务失败:" + err.Error()})
+		//队伍满了，服务暂时忙，返回503
+		if errors.Is(err,service.ErrQueueFull){
+			c.JSON(http.StatusServiceUnavailable,gin.H{"error":err.Error()})
+			return
+		}
+		c.JSON(http.StatusInternalServerError,gin.H{"error":"创建任务失败:" + err.Error()})
 		return
 	}
-	c.JSON(200,gin.H{"task_id":taskID,"status":model.StatusPending})
+	c.JSON(http.StatusOK,gin.H{"task_id":taskID,"status":model.StatusPending})
 }
 
 func (h *TaskHandler) GetTask(c *gin.Context){
@@ -50,8 +57,15 @@ func (h *TaskHandler) GetTask(c *gin.Context){
 func (h *TaskHandler) RetryTask(c *gin.Context){
 	taskID := c.Param("task_id")
 
-	_= h.service.RetryTask(taskID)
-	c.JSON(200,gin.H{"message":"重试任务已进入后台排队","task_id":taskID})
+	//满了重试报错
+	if err := h.service.RetryTask(taskID);err != nil{
+		if errors.Is(err,service.ErrQueueFull){
+			c.JSON(http.StatusServiceUnavailable,gin.H{"error":err.Error()})
+			return
+		}
+	}
+	
+	c.JSON(http.StatusOK,gin.H{"message":"重试任务已进入后台排队","task_id":taskID})
 }
 
 func (h *TaskHandler) RegisterRoutes(r *gin.Engine){

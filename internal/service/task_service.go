@@ -6,6 +6,7 @@ import (
 	"echocraft/internal/model"
 	"echocraft/pkg/llm"
 	"echocraft/pkg/tts"
+	"errors"
 	"fmt"
 	"time"
 )
@@ -16,6 +17,10 @@ type TaskService struct {
 	taskChan chan string
 	apiKey   string
 }
+
+// 哨兵错误:队列满属于"预期内的失败",要用固定错误值,上层才能用 errors.Is 认出来
+// 每次 fmt.Errorf 新建一个,外面就判断不了到底是不是队列满
+var ErrQueueFull = errors.New("任务队列已满，请稍后重试")
 
 // 注入dao依赖，初始化缓冲队列
 func NewTaskService(taskDao *dao.TaskDAO, apiKey string) *TaskService {
@@ -45,9 +50,17 @@ func (s *TaskService) CreateTask(topic string) (string, error) {
 		return "", err
 	}
 
-	s.taskChan <- taskID
-
-	return taskID, nil
+	select{
+	case s.taskChan <- taskID:
+		return taskID,nil
+	default:
+		//队列满了，标记错误
+		_ = s.dao.Update(&task,map[string]any{
+			"status": model.StatusFailed,
+			"error_msg":ErrQueueFull.Error(),
+		})
+		return "",ErrQueueFull
+	}
 }
 
 func (s *TaskService) GetTask(taskid string) (*model.Task, error) {
@@ -55,58 +68,65 @@ func (s *TaskService) GetTask(taskid string) (*model.Task, error) {
 }
 
 func (s *TaskService) RetryTask(taskid string) error {
-	s.taskChan <- taskid
+	
+	select{
+	case s.taskChan <- taskid:
+		return nil
+	default:
+		return ErrQueueFull
+	}
 
-	return nil
+	
 }
 
 // 业务工作
-func (s *TaskService) startWorker(workerID int) {
-	go func() {
-		for taskID := range s.taskChan {
-			fmt.Printf("[Worker %d]抢到任务:%s，开始处理...\n", workerID, taskID)
-			//ctx是30s的超时context
-			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-
-			//拿到task本体
-			task, err := s.dao.GetByTaskID(taskID)
-			if err != nil {
-				fmt.Printf("[Worker %d]查询任务 %s 失败：%v\n", workerID, taskID, err)
-				cancel()
-				continue
-			}
-			if task.ScriptContent == "" {
-				script, err := llm.GenerateScript(ctx, s.apiKey, task.Topic)
-				if err != nil {
-					s.dao.Update(task, map[string]any{
-						"status":    model.StatusFailed,
-						"error_msg": err.Error(),
-					})
-					cancel()
-					continue
-				}
-				task.ScriptContent = script
-				s.dao.Update(task, map[string]any{
-					"script_content": script,
-					"status":         model.StatusScriptDone,
-				})
-			}
-			audioPath := fmt.Sprintf("storage/%s.mp3", task.TaskID)
-			if err := tts.GenerateAudio(ctx, task.ScriptContent, audioPath); err != nil {
-				s.dao.Update(task, map[string]any{
-					"status":    model.StatusFailed,
-					"error_msg": err.Error(),
-				})
-				cancel()
-				continue
-			}
-			s.dao.Update(task, map[string]any{
-				"audio_path": audioPath,
-				"status":     model.StatusSuccess,
-			})
-
-			fmt.Printf("[Worker %d]任务%s全流程完成,已落盘!\n", workerID, taskID)
-			cancel()
+func (s *TaskService) startWorker(workerID int){
+	go func(){
+		for taskID := range s.taskChan{
+			fmt.Printf("[Worker %d]抢到任务:%s,开始处理...\n",workerID,taskID)
+			s.processTask(workerID,taskID)
 		}
 	}()
+}
+
+func (s *TaskService) processTask(workerID int,taskID string){
+	ctx,cancel := context.WithTimeout(context.Background(),time.Minute * 5)
+	defer cancel()
+
+	task,err := s.dao.GetByTaskID(taskID)
+	if err != nil{
+		fmt.Printf("[Worker %d]查询任务 %s 失败:%v \n",workerID,taskID,err)
+		return
+	}
+
+	if task.ScriptContent == ""{
+		//llmctx是一个闹钟，而调用llmcancel可以手动关闭闹钟
+		llmCtx,llmCancel := context.WithTimeout(ctx,60*time.Second)
+		script,err := llm.GenerateScript(llmCtx,s.apiKey,task.Topic)
+		llmCancel()
+		if err != nil{
+			s.dao.Update(task,map[string]any{
+				"status":model.StatusFailed,
+				"err_msg":err.Error(),
+			})
+		}
+		task.ScriptContent = script
+		s.dao.Update(task,map[string]any{
+			"status":model.StatusScriptDone,
+			"script_content":script,
+		})
+
+		//tts合成
+		ttsCtx,ttsCancel := context.WithTimeout(ctx,time.Second*120)
+		audioPath := fmt.Sprintf("storage/%s.mp3",task.TaskID)
+		err = tts.GenerateAudio(ttsCtx,script,audioPath)
+		ttsCancel()
+		if err != nil {
+			s.dao.Update(task, map[string]any{"status": model.StatusFailed, "error_msg": err.Error()})
+			return
+		}
+
+		s.dao.Update(task, map[string]any{"audio_path": audioPath, "status": model.StatusSuccess})
+		fmt.Printf("[Worker %d]任务%s全流程完成,已落盘!\n", workerID, taskID)
+	}
 }

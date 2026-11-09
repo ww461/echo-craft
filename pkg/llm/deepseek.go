@@ -7,7 +7,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
+	"time"
 )
 
 // Message 定义与大模型对话的单条消息格式（OpenAI 标准协议）
@@ -35,6 +37,17 @@ type ChatResp struct {
 	} `json:"choices"`
 }
 
+
+//
+var httpClient = &http.Client{
+	Timeout: 30 * time.Second,
+	Transport: &http.Transport{
+		MaxIdleConns: 100,
+		MaxIdleConnsPerHost: 20,
+		IdleConnTimeout: 90 * time.Second,
+	},
+}
+
 //15.组装prompt,构建带Context超时的http请求
 //传入上下文、密钥、主题，想deepseek请求200字口播文案,Generatescript-生成文本
 	//ctx是30s的闹钟
@@ -47,7 +60,10 @@ func GenerateScript(ctx context.Context,apiKey string,topic string) (string,erro
 		Messages: []Message{{Role:"user",Content: prompt}},
 	}
 	//将结构体序列化为JSON字节切片,Marshal 序列化
-	data,_:= json.Marshal(reqBody)
+	data,err:= json.Marshal(reqBody)
+	if err != nil{
+		return "",fmt.Errorf("序列化请求失败:%w",err)
+	}
 	//绑定context超时监控，构建请求体
 	httpReq,err := http.NewRequestWithContext(ctx,"POST","https://api.deepseek.com/chat/completions",bytes.NewBuffer(data))
 	if err != nil{
@@ -58,12 +74,18 @@ func GenerateScript(ctx context.Context,apiKey string,topic string) (string,erro
 	//注入Bearer令牌鉴权,
 	httpReq.Header.Set("Authorization","Bearer " + apiKey)
 	//使用go原生http客户端将请求发出
-	resp,err := http.DefaultClient.Do(httpReq)
+	resp,err := httpClient.Do(httpReq)
 	if err != nil{
 		return "",err
 	}
 	//defer 保证响应体网络流被彻底关闭,防止发生底层的socket连接泄露
 	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK{
+		body,_ := io.ReadAll(io.LimitReader(resp.Body,512))
+		return "",fmt.Errorf("DeepSeek返回状态码%d:%s,",resp.StatusCode,string(body))
+	}
+
+
 	//准备接大模型吐回来的数据
 	var chatResp ChatResp
 	//NewDecoder 边读网络流边反序列化成go结构体，decode解码
