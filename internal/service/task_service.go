@@ -22,6 +22,9 @@ type TaskService struct {
 // 每次 fmt.Errorf 新建一个,外面就判断不了到底是不是队列满
 var ErrQueueFull = errors.New("任务队列已满，请稍后重试")
 
+//状态不对时，不能重试
+var ErrorTaskNotRetryable = errors.New("任务当前状态不允许重试")
+
 // 注入dao依赖，初始化缓冲队列
 func NewTaskService(taskDao *dao.TaskDAO, apiKey string) *TaskService {
 	s := &TaskService{
@@ -67,16 +70,23 @@ func (s *TaskService) GetTask(taskid string) (*model.Task, error) {
 	return s.dao.GetByTaskID(taskid)
 }
 
+//传taskid重试
 func (s *TaskService) RetryTask(taskid string) error {
-	
+	ok,err := s.dao.UpdateStatusCAS(taskid,model.StatusFailed,model.StatusPending,map[string]any{"err_msg":""})
+	if err != nil{
+		return err
+	}
+	if !ok{
+		return ErrorTaskNotRetryable
+	}
 	select{
 	case s.taskChan <- taskid:
 		return nil
 	default:
+		//队列满了
+		_,_ = s.dao.UpdateStatusCAS(taskid,model.StatusPending,model.StatusFailed,map[string]any{"err_msg":ErrQueueFull.Error()})
 		return ErrQueueFull
 	}
-
-	
 }
 
 // 业务工作
@@ -92,6 +102,18 @@ func (s *TaskService) startWorker(workerID int){
 func (s *TaskService) processTask(workerID int,taskID string){
 	ctx,cancel := context.WithTimeout(context.Background(),time.Minute * 5)
 	defer cancel()
+
+	//抢任务,只有pending才能改为running
+	//同一个任务被投递两次，用户连续点击两次重试，只有一个worker能抢到
+	ok,err := s.dao.UpdateStatusCAS(taskID,model.StatusPending,model.StatusRunning,nil)
+	if err != nil{
+		fmt.Printf("[Worker %d]抢占任务 %s 失败 %v",workerID,taskID,err)
+		return
+	}
+	if !ok {
+		fmt.Printf("[Worker %d] %s 状态已变,跳过\n",workerID,taskID)
+		return 
+	}
 
 	task,err := s.dao.GetByTaskID(taskID)
 	if err != nil{

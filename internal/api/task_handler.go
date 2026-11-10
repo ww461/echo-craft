@@ -48,7 +48,7 @@ func (h *TaskHandler) GetTask(c *gin.Context){
 
 	task,err := h.service.GetTask(taskID)
 	if err != nil{
-		c.JSON(400,gin.H{"error":"任务单号不存在"})
+		c.JSON(http.StatusNotFound,gin.H{"error":"任务单号不存在"})
 		return
 	}
 	c.JSON(200,gin.H{"code":200,"message":"success","data":task})
@@ -59,6 +59,10 @@ func (h *TaskHandler) RetryTask(c *gin.Context){
 
 	//满了重试报错
 	if err := h.service.RetryTask(taskID);err != nil{
+		if errors.Is(err,service.ErrorTaskNotRetryable){
+			c.JSON(http.StatusConflict,gin.H{"error" : err.Error()})
+			return
+		}
 		if errors.Is(err,service.ErrQueueFull){
 			c.JSON(http.StatusServiceUnavailable,gin.H{"error":err.Error()})
 			return

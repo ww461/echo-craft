@@ -36,3 +36,14 @@ func (d *TaskDAO) GetByTaskID(taskID string)(*model.Task,error){
 func (d *TaskDAO) Update(task *model.Task,updates map[string]any) error{
 	return d.db.Model(task).Updates(updates).Error
 }
+
+//返回 到底有没有改到行，数据库本身是否出错
+func (d *TaskDAO) UpdateStatusCAS(TaskID string,from,to model.TaskStatus,updates map[string]any) (bool,error){
+	if updates == nil{
+		updates = map[string]any{}
+	}
+	updates["status"] = to
+
+	result := d.db.Where("task_id = ? AND status = ?",TaskID,from).Updates(updates)
+	return result.RowsAffected > 0 ,result.Error
+}

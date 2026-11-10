@@ -7,6 +7,8 @@ type TaskStatus string
 const (
 	// StatusPending 任务已入库排队
 	StatusPending TaskStatus = "PENDING"
+	//正在跑
+	StatusRunning TaskStatus = "RUNNING"
 	// StatusScriptDone AI 文案已生成入库
 	StatusScriptDone TaskStatus = "SCRIPT_DONE"
 	// StatusSuccess 音频合成成功，流程结束
@@ -33,6 +35,10 @@ type Task struct {
 	AudioPath string `gorm:"type:varchar(512)" json:"audio_path"`
 	// ErrorMsg 任何一步执行失败时记录的报错信息
 	ErrorMsg string `gorm:"type:varchar(512)" json:"error_msg"`
+	//RetryCount 重试了几次，超过上限就进死信，
+	RetryCount int `gorm:"not null;default:0" json:"retry_count"`
+	//每次状态变化都更新，后面扫僵尸任务就靠它判断多久没动静
+	UpdatedAt time.Time `json:"updated_at"`
 	// CreatedAt 记录任务创建的时间
 	CreatedAt time.Time `json:"created_at"`
 }
