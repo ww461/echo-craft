@@ -2,14 +2,15 @@ package dao
 
 //Data Access Object 数据访问对象
 //把跟mysql写的sql语句全部写在这
-import(
+import (
 	"echocraft/internal/model"
+	"time"
+
 	"gorm.io/gorm"
 )
 
-
 // TaskDAO 负责 tasks 表的所有数据库物理增删改查操作
-	//mysql <-> GORM <-> DAO
+//mysql <-> GORM <-> DAO
 type TaskDAO struct{
 	//持有GORM的底层连接操作对象
 	db *gorm.DB
@@ -44,6 +45,19 @@ func (d *TaskDAO) UpdateStatusCAS(TaskID string,from,to model.TaskStatus,updates
 	}
 	updates["status"] = to
 
-	result := d.db.Where("task_id = ? AND status = ?",TaskID,from).Updates(updates)
+	result := d.db.Model(&model.Task{}).Where("task_id = ? AND status = ?",TaskID,from).Updates(updates)
 	return result.RowsAffected > 0 ,result.Error
 }
+
+//按状态捞一批任务，启动恢复和后面的定时扫描
+func (d *TaskDAO) ListByStatus(status model.TaskStatus,limit int) ([]model.Task,error){
+	var tasks []model.Task	
+	err := d.db.Where("status = ? ",status).Order("created_at asc").Limit(limit).Find(&tasks).Error
+	return tasks,err
+}
+
+func (d *TaskDAO) ListStaleRunning(threshold time.Time,limit int) ([]model.Task,error){
+	var tasks []model.Task
+	err := d.db.Where("status = ? AND updated_at < ?",model.StatusRunning,threshold).Limit(limit).Find(&tasks).Error
+	return tasks,err
+}	

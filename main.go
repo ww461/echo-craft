@@ -13,18 +13,18 @@ import (
 	"gorm.io/gorm"
 )
 
-
 func main() {
-	_= godotenv.Load()
+	_ = godotenv.Load()
 	apiKey := os.Getenv("DEEPSEEK_API_KEY")
-	if(apiKey == ""){
+	if apiKey == "" {
 		panic("缺失API_KEY配置,请检查.env文件!")
 	}
-	
+
 	dsn := os.Getenv("MYSQL_DSN")
-	if dsn == ""{
+	if dsn == "" {
 		panic("缺少MYSQL_DSN配置,请检查.env文件")
 	}
+
 	db, err := gorm.Open(mysql.Open(dsn), &gorm.Config{})
 	if err != nil {
 		panic("连接数据库失败：" + err.Error())
@@ -32,15 +32,18 @@ func main() {
 	_ = db.AutoMigrate(&model.Task{})
 
 	taskDAO := dao.NewTaskDAO(db)
-	TaskService := service.NewTaskService(taskDAO,apiKey)
+	TaskService := service.NewTaskService(taskDAO, apiKey)
+	TaskService.RecoverPending()
+	TaskService.StartStaleScanner()
 	TaskHandler := api.NewTaskHandler(TaskService)
 
 	r := gin.Default()
 	TaskHandler.RegisterRoutes(r)
 
 	addr := os.Getenv("SERVER_ADDR")
-	if addr == ""{
+	if addr == "" {
 		addr = ":9090"
 	}
+
 	r.Run(addr)
 }

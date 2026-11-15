@@ -51,7 +51,7 @@ func (h *TaskHandler) GetTask(c *gin.Context){
 		c.JSON(http.StatusNotFound,gin.H{"error":"任务单号不存在"})
 		return
 	}
-	c.JSON(200,gin.H{"code":200,"message":"success","data":task})
+	c.JSON(http.StatusOK,gin.H{"code":200,"message":"success","data":task})
 }
 
 func (h *TaskHandler) RetryTask(c *gin.Context){
@@ -67,6 +67,8 @@ func (h *TaskHandler) RetryTask(c *gin.Context){
 			c.JSON(http.StatusServiceUnavailable,gin.H{"error":err.Error()})
 			return
 		}
+		c.JSON(http.StatusInternalServerError,gin.H{"error":"重试失败" + err.Error()})
+		return
 	}
 	
 	c.JSON(http.StatusOK,gin.H{"message":"重试任务已进入后台排队","task_id":taskID})
@@ -74,6 +76,6 @@ func (h *TaskHandler) RetryTask(c *gin.Context){
 
 func (h *TaskHandler) RegisterRoutes(r *gin.Engine){
 	r.POST("/api/v1/tasks",h.CreateTask)
-	r.GET("api/v1/tasks/:task_id",h.GetTask)
-	r.POST("api/v1/tasks/:task_id/retry",h.RetryTask)
+	r.GET("/api/v1/tasks/:task_id",h.GetTask)
+	r.POST("/api/v1/tasks/:task_id/retry",h.RetryTask)
 }

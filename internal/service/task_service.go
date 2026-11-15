@@ -22,8 +22,10 @@ type TaskService struct {
 // 每次 fmt.Errorf 新建一个,外面就判断不了到底是不是队列满
 var ErrQueueFull = errors.New("任务队列已满，请稍后重试")
 
-//状态不对时，不能重试
+// 状态不对时，不能重试
 var ErrorTaskNotRetryable = errors.New("任务当前状态不允许重试")
+
+const maxRetry = 3
 
 // 注入dao依赖，初始化缓冲队列
 func NewTaskService(taskDao *dao.TaskDAO, apiKey string) *TaskService {
@@ -36,6 +38,78 @@ func NewTaskService(taskDao *dao.TaskDAO, apiKey string) *TaskService {
 		s.startWorker(i)
 	}
 	return s
+}
+
+// 把上次没跑完的任务重新投进队列
+func (s *TaskService) RecoverPending() {
+	tasks, err := s.dao.ListByStatus(model.StatusPending, 1000)
+	if err != nil {
+		fmt.Printf("[Recover] 扫描待处理任务失败: %v\n", err)
+		return
+	}
+
+	recovered := 0
+	for _, t := range tasks {
+		select {
+		case s.taskChan <- t.TaskID:
+			recovered++
+		default:
+			fmt.Printf("[Recover] 队列已满,已恢复 %d 个， 剩 %d 个待补偿 \n", recovered, len(tasks)-recovered)
+			return
+		}
+	}
+	fmt.Printf("[Recover] 启动恢复成功，重新投递 %d 个任务\n", recovered)
+}
+
+// 起一个后台定时器，每分钟扫一次卡死的任务
+func (s *TaskService) StartStaleScanner() {
+	go func() {
+		ticker := time.NewTicker(time.Minute)
+		defer ticker.Stop()
+		for range ticker.C {
+			s.recoverStale()
+		}
+	}()
+}
+
+func (s *TaskService) recoverStale() {
+	pendings, err := s.dao.ListByStatus(model.StatusPending, 100)
+	if err == nil {
+		for _, t := range pendings {
+			select {
+			case s.taskChan <- t.TaskID:
+			default:
+				return
+			}
+		}
+	}
+	// 阈值必须大于 processTask 里 5 分钟的兜底超时
+	// 设小了会把正在正常跑的任务当成僵尸重置,同一个任务跑两遍
+	threshold := time.Now().Add(-10 * time.Minute)
+	tasks, err := s.dao.ListStaleRunning(threshold, 100)
+	if err != nil {
+		fmt.Printf("[Stale] 扫描失败:%v\n", err)
+		return
+	}
+	for _, t := range tasks {
+		// 重试次数用完了就判死,别再捡回来,否则会无限循环烧你的 API 额度
+		if t.RetryCount >= maxRetry {
+			_, _ = s.dao.UpdateStatusCAS(t.TaskID, model.StatusRunning, model.StatusFailed,
+				map[string]any{"error_msg": "重试次数超限,任务废弃"})
+			continue
+		}
+		// 改回 PENDING,worker 就能重新抢到它,同时记一次重试
+		ok, err := s.dao.UpdateStatusCAS(t.TaskID, model.StatusRunning, model.StatusPending,
+			map[string]any{"error_msg": "执行超时,重新排队", "retry_count": t.RetryCount + 1})
+		if err != nil || !ok {
+			continue
+		}
+		// 队列满就先不投,下一分钟扫描还会捡到它,不会丢
+		select {
+		case s.taskChan <- t.TaskID:
+		default:
+		}
+	}
 }
 
 // createTask 接收主题词，执行生成单号，调用dao落库，投递至队列，返回单号
@@ -53,16 +127,16 @@ func (s *TaskService) CreateTask(topic string) (string, error) {
 		return "", err
 	}
 
-	select{
+	select {
 	case s.taskChan <- taskID:
-		return taskID,nil
+		return taskID, nil
 	default:
 		//队列满了，标记错误
-		_ = s.dao.Update(&task,map[string]any{
-			"status": model.StatusFailed,
-			"error_msg":ErrQueueFull.Error(),
+		_ = s.dao.Update(&task, map[string]any{
+			"status":    model.StatusFailed,
+			"error_msg": ErrQueueFull.Error(),
 		})
-		return "",ErrQueueFull
+		return "", ErrQueueFull
 	}
 }
 
@@ -70,85 +144,87 @@ func (s *TaskService) GetTask(taskid string) (*model.Task, error) {
 	return s.dao.GetByTaskID(taskid)
 }
 
-//传taskid重试
+// 传taskid重试
 func (s *TaskService) RetryTask(taskid string) error {
-	ok,err := s.dao.UpdateStatusCAS(taskid,model.StatusFailed,model.StatusPending,map[string]any{"err_msg":""})
-	if err != nil{
+	ok, err := s.dao.UpdateStatusCAS(taskid, model.StatusFailed, model.StatusPending, map[string]any{"error_msg": ""})
+	if err != nil {
 		return err
 	}
-	if !ok{
+	if !ok {
 		return ErrorTaskNotRetryable
 	}
-	select{
+	select {
 	case s.taskChan <- taskid:
 		return nil
 	default:
 		//队列满了
-		_,_ = s.dao.UpdateStatusCAS(taskid,model.StatusPending,model.StatusFailed,map[string]any{"err_msg":ErrQueueFull.Error()})
+		_, _ = s.dao.UpdateStatusCAS(taskid, model.StatusPending, model.StatusFailed, map[string]any{"error_msg": ErrQueueFull.Error()})
 		return ErrQueueFull
 	}
 }
 
 // 业务工作
-func (s *TaskService) startWorker(workerID int){
-	go func(){
-		for taskID := range s.taskChan{
-			fmt.Printf("[Worker %d]抢到任务:%s,开始处理...\n",workerID,taskID)
-			s.processTask(workerID,taskID)
+func (s *TaskService) startWorker(workerID int) {
+	go func() {
+		for taskID := range s.taskChan {
+			fmt.Printf("[Worker %d]抢到任务:%s,开始处理...\n", workerID, taskID)
+			s.processTask(workerID, taskID)
 		}
 	}()
 }
 
-func (s *TaskService) processTask(workerID int,taskID string){
-	ctx,cancel := context.WithTimeout(context.Background(),time.Minute * 5)
+func (s *TaskService) processTask(workerID int, taskID string) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute*5)
 	defer cancel()
 
 	//抢任务,只有pending才能改为running
 	//同一个任务被投递两次，用户连续点击两次重试，只有一个worker能抢到
-	ok,err := s.dao.UpdateStatusCAS(taskID,model.StatusPending,model.StatusRunning,nil)
-	if err != nil{
-		fmt.Printf("[Worker %d]抢占任务 %s 失败 %v",workerID,taskID,err)
+	ok, err := s.dao.UpdateStatusCAS(taskID, model.StatusPending, model.StatusRunning, nil)
+	if err != nil {
+		fmt.Printf("[Worker %d]抢占任务 %s 失败 %v", workerID, taskID, err)
 		return
 	}
 	if !ok {
-		fmt.Printf("[Worker %d] %s 状态已变,跳过\n",workerID,taskID)
-		return 
-	}
-
-	task,err := s.dao.GetByTaskID(taskID)
-	if err != nil{
-		fmt.Printf("[Worker %d]查询任务 %s 失败:%v \n",workerID,taskID,err)
+		fmt.Printf("[Worker %d] %s 状态已变,跳过\n", workerID, taskID)
 		return
 	}
 
-	if task.ScriptContent == ""{
-		//llmctx是一个闹钟，而调用llmcancel可以手动关闭闹钟
-		llmCtx,llmCancel := context.WithTimeout(ctx,60*time.Second)
-		script,err := llm.GenerateScript(llmCtx,s.apiKey,task.Topic)
-		llmCancel()
-		if err != nil{
-			s.dao.Update(task,map[string]any{
-				"status":model.StatusFailed,
-				"err_msg":err.Error(),
-			})
-		}
-		task.ScriptContent = script
-		s.dao.Update(task,map[string]any{
-			"status":model.StatusScriptDone,
-			"script_content":script,
-		})
+	task, err := s.dao.GetByTaskID(taskID)
+	if err != nil {
+		fmt.Printf("[Worker %d]查询任务 %s 失败:%v \n", workerID, taskID, err)
+		return
+	}
 
-		//tts合成
-		ttsCtx,ttsCancel := context.WithTimeout(ctx,time.Second*120)
-		audioPath := fmt.Sprintf("storage/%s.mp3",task.TaskID)
-		err = tts.GenerateAudio(ttsCtx,script,audioPath)
-		ttsCancel()
+	if task.ScriptContent == "" {
+		//llmctx是一个闹钟，而调用llmcancel可以手动关闭闹钟
+		llmCtx, llmCancel := context.WithTimeout(ctx, 60*time.Second)
+		script, err := llm.GenerateScript(llmCtx, s.apiKey, task.Topic)
+		llmCancel()
 		if err != nil {
-			s.dao.Update(task, map[string]any{"status": model.StatusFailed, "error_msg": err.Error()})
+			s.dao.Update(task, map[string]any{
+				"status":    model.StatusFailed,
+				"error_msg": err.Error(),
+			})
 			return
 		}
-
-		s.dao.Update(task, map[string]any{"audio_path": audioPath, "status": model.StatusSuccess})
-		fmt.Printf("[Worker %d]任务%s全流程完成,已落盘!\n", workerID, taskID)
+		task.ScriptContent = script
+		s.dao.Update(task, map[string]any{
+			"status":         model.StatusScriptDone,
+			"script_content": script,
+		})
 	}
+
+	//tts合成
+	ttsCtx, ttsCancel := context.WithTimeout(ctx, time.Second*120)
+	audioPath := fmt.Sprintf("storage/%s.mp3", task.TaskID)
+	err = tts.GenerateAudio(ttsCtx, task.ScriptContent, audioPath)
+	ttsCancel()
+	if err != nil {
+		s.dao.Update(task, map[string]any{"status": model.StatusFailed, "error_msg": err.Error()})
+		return
+	}
+
+	s.dao.Update(task, map[string]any{"audio_path": audioPath, "status": model.StatusSuccess})
+	fmt.Printf("[Worker %d]任务%s全流程完成,已落盘!\n", workerID, taskID)
+
 }
