@@ -74,7 +74,7 @@ func (s *TaskService) StartStaleScanner() {
 
 func (s *TaskService) recoverStale() {
 	pendings, err := s.dao.ListByStatus(model.StatusPending, 100)
-	if err == nil {
+	if err    == nil {
 		for _, t := range pendings {
 			select {
 			case s.taskChan <- t.TaskID:
